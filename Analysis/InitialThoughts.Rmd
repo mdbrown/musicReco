@@ -1,0 +1,183 @@
+---
+title: "Initial Meandering:MSD"
+author: "marshall"
+date: "Saturday, April 18, 2015"
+output: html_document
+---
+
+
+```{r}
+source("../R//mapFunctions.R")
+source("../R/getRecoFUN.R")
+library(dplyr)
+
+
+library(data.table)
+
+trainTrips.dt <- fread("../Data/train_triplets.txt") #loads 
+#trainTrips.dt data.table of traintrips.txt
+setnames(trainTrips.dt, c("user", "song", "count"))
+setkey(trainTrips.dt, song)
+
+
+validTrips.known.dt <- fread("../Data/kaggle_visible_evaluation_triplets.txt")#fread("../Data/EvalDataYear1MSDWebsite/year1_valid_triplets_visible.txt") #
+setnames(validTrips.known.dt, c("user", "song", "count"))
+
+setkey(validTrips.known.dt, song)
+
+
+#prepare the 'actual data'  ('use validation data for 'public leaderboard')
+validTrips.hidden.dt <- fread("../Data/EvalDataYear1MSDWebsite//year1_valid_triplets_hidden.txt")
+setnames(validTrips.hidden.dt, c("user", "song", "count"))
+setkey(validTrips.hidden.dt, user)
+
+kags <- validTrips.hidden.dt %>% group_by(user) %>% summarise(n())
+
+setkey(kags, user)
+```
+
+### First Step
+write a simple recommender that recommends the 500 top songs that the user hasn't listened to yet. We then will evaluate the model using the mAP measure. I just want to get a feel for the data so that I can effectively reproduce these results. 
+
+To do this we need to: 
+
+1. obtain a list of most popular songs. 
+2. for each user we wish to make predictions for, find all songs they have listened to. 
+3. make recommendations based on the most popular songs, save the average number of songs we predicted correctly out of 500. 
+
+We wrap step 2 and 3 together so we only use a single for loop. 
+
+```{r}
+#obtain a list of most popular songs. 
+
+plays.per.song <- trainTrips.dt %>%
+                      group_by(song) %>%
+                        summarise(
+                          number.plays = n()
+                         )
+
+songPop <- plays.per.song[order(-number.plays)]
+songPop <- songPop[1:1000,] #only need the top bit of this table
+rm(plays.per.song)
+
+#also get the list of song popularity from the kaggle
+# 'test' set so I can reproduce their results. 
+
+
+plays.per.song <- validTrips.known.dt %>%
+                      group_by(song) %>%
+                        summarise(
+                          number.plays = n()
+                         )
+
+songPop.test <- plays.per.song[order(-number.plays)]
+songPop.test <- songPop.test[1:1000,]
+rm(plays.per.song)
+
+setkey(songPop.test, song)
+setkey(songPop, song)
+```
+
+Now we have two helper tables, one of song popularity from the full training set, and one for song popularity on the testing data set. 
+
+Next, we want to step through kaggle users we wish to make a prediction for, make the prediction, and evaluate the prediction using the mean average precision. We average over users to get our result. 
+
+```{r}
+
+#load kaggle users to make predictions for 
+
+#kags <- fread("../Data/kaggle_users.txt")
+#setnames(kags, c("user"))
+#setkey(kags, user)
+
+
+setkey(validTrips.known.dt, user)
+
+
+#realTrips.dt2 <- fread("../Data/EvalDataYear1MSDWebsite/year1_test_triplets_hidden.txt")
+#setnames(realTrips.dt2, c("user", "song", "count"))
+
+#realTrips.dt <- rbindlist(list(realTrips.dt, realTrips.dt2))
+
+scores = rep(0, nrow(kags))
+
+for(i  in 1:nrow(kags)){
+  u = kags[i, user]
+  #songs this user has already liked
+  songs.u <- validTrips.known.dt %>% filter(user == as.character(u)) %>% select(song)
+  setkey(songs.u, song)
+  #obtain the top 500 songs not including songs.u from songPop.test above
+  songPop.u <-  songPop.test[!J(songs.u)]
+  
+  prediction <- songPop.u[order(-number.plays)][1:500,] %>% select(song)
+  
+  actual <- validTrips.hidden.dt %>% filter(user == as.character(u)) %>% select(song)
+  scores[i] <- apk(k = 500, actual = actual[[1]], predicted = prediction[[1]])
+  if(i %% 1000 ==0) print(paste(round(i/nrow(kags), 2), ":", mean(scores[1:i])))
+}
+
+mean(scores) #0.02255447
+
+#nice!
+rm(songPop.u, songPop, songPop.test, songs.u, actual, prediction)
+```
+
+## Collaborative Filtering
+
+Now I implement Fabio Aiolli's memory-based collaborative filtering approach
+that won the MSD kaggle challenge. Note that I only implement the item based
+filtering approach. This allows me to make a recommendation even if I only have 
+one song in the history.  
+
+
+```{r}
+#build a function, for a user, and a data.table of triplets
+# use user based cf to build a recommendation of 500 songs
+zero <- function() return(0)
+a = .15
+q = 3
+setkey(trainTrips.dt, song)
+setkey(validTrips.hidden.dt, user)
+setkey(validTrips.known.dt, song)
+
+songs.rated.base <- trainTrips.dt %>% group_by(song) %>% summarise(n.i.song = n(), score =zero(), score.cnt = zero())
+
+setkey(songs.rated.base, song)
+kags.n <- 10000
+scores = rep(0, kags.n); scores.cnt<- rep(0, kags.n)
+predicted = data.frame(matrix(NA, nrow = 500, ncol = kags.n))
+user.liked <- rep(0, kags.n)
+actual = list()
+
+for(i  in 1001:nrow(kags)){
+  u = kags[i, user]
+  tmp <- get.reco.is(u, a=a, q=q)
+  
+  predicted[,i] <- as.character(tmp$songs)
+  actual[[i]] <-  as.character(validTrips.hidden.dt[.(u),song] )
+
+  user.liked[i] <- tmp$user.liked
+  scores[i] <- apk(k = 500, actual = actual[[i]], predicted = tmp$songs)
+  scores.cnt[i]<- apk(k = 500, actual = actual[[i]], predicted = tmp$songs.cnt)
+ 
+  print(paste(i, ":", round(scores[i], 3), "/", round(scores.cnt[i], 3), ":" , round(mean(scores[1:i]), 3), "/", round(mean(scores.cnt[1:i]), 3)))
+  
+  
+}
+
+
+save(predicted, actual, scores, scores.cnt, user.liked, file = paste("mytestpreds_", i, ".Rdata", sep = ""))
+
+mean(scores) #0.02255447
+mean(scores.cnt)
+
+dat <- data.frame("user.liked" = user.liked, "scores" = scores, "scores.cnt" = scores.cnt)
+
+mean(scores[user.liked <= 5])
+mean(scores.cnt[user.liked <= 5])
+
+ggplot(dat, aes(user.liked, scores.cnt)) + geom_point(alpha = .1) + geom_smooth()
+
+rm(validTrips.hidden, validTrips.known.d)
+
+```

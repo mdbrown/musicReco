@@ -1,0 +1,30 @@
+---
+title: "Song Recommender: MSD Profile Data"
+author: "Marshall Brown"
+date: "Tuesday, May 12, 2015"
+output: html_document
+---
+
+#Intro
+
+##The problem 
+
+###The data
+
+###Initial Steps
+
+###Goals
+
+#Methods 
+
+## Collaborative Filtering 
+
+## Evaluating Recommendations
+
+#Results
+
+##Kaggle competition
+
+##Shiny Application
+
+##Thoughts and extensions
